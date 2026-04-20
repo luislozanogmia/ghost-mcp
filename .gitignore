@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.playwright-cli/
 browser_context/
 browser_context_instances/
 browser_context_standalone/
@@ -12,6 +13,13 @@ linkedin_auth.json
 playwright_auth.json
 *.lock
 ghost_daemon.pid
+ghost_chrome_proxy.pid
 ghost_server.log
 *.log
+runtime/
+screenshots/
+output/
+backup/
+*.bak-*
+*.prev-*
 .DS_Store
