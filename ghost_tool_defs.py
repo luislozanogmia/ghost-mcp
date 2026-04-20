@@ -57,6 +57,13 @@ def get_ghost_tools() -> list[ToolDef]:
                             "Chrome session through the live Chrome auto-connect flow."
                         ),
                     },
+                    "playwright_session": {
+                        "type": "string",
+                        "description": (
+                            "Attach Ghost to a managed Playwright CLI session instead of a Chrome/CDP target. "
+                            "Currently supported values: 'linkedin_auth_a' and 'linkedin_auth_b'."
+                        ),
+                    },
                     "reuse_only": {
                         "type": "boolean",
                         "description": (

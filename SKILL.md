@@ -12,6 +12,7 @@ Use this skill when browser automation should run through Ghost Browser v3 using
 - A long-lived JSON-line REPL for agentic browser sessions
 - A bridge for vacuum/action workflows over live browser pages
 - Chrome session attachment through the Ghost runtime, including external browser support
+- Native attach to managed Playwright sessions `linkedin_auth_a` and `linkedin_auth_b`
 - A legacy server shim kept only for older integrations and not supported for production use
 
 ## Architecture
@@ -22,9 +23,9 @@ ghost_cli.py               <- the supported entrypoint
   ↓
 runtime host               <- in-process Ghost runtime
   ↓
-live Chrome transport      <- used when attaching to an existing Chrome session
+transport layer            <- live Chrome, direct CDP, or Playwright session
   ↓
-Chrome (live browser)
+browser/session target
 ```
 
 Primary path: `./ghost-cli`
@@ -47,6 +48,7 @@ playwright install chromium
 - `./ghost-cli list-tools`
 - `./ghost-cli call ghost_status`
 - `./ghost-cli call ghost_instance_create --arguments '{"instance_id":"live","cdp_url":"live-chrome"}'`
+- `./ghost-cli call ghost_instance_create --arguments '{"instance_id":"li-b","playwright_session":"linkedin_auth_b"}'`
 - `./ghost-cli repl`
 - `python3 helpers/ghost_cache_bridge.py --help`
 - `python3 helpers/ghost_cache_bridge.py --self-test`
@@ -79,6 +81,7 @@ All commands accept optional `instance_id`. Omit it to use the `default` session
 4. Use different `instance_id` values for independent browser sessions.
 5. Prefer `./ghost-cli repl` for long LinkedIn runs so state stays in one CLI process.
 6. Do not treat anything under `deprecated/mcp/` as a supported production transport.
+7. For the managed LinkedIn Playwright wrappers, use `playwright_session: "linkedin_auth_a"` or `playwright_session: "linkedin_auth_b"` instead of CDP.
 
 ## Standard Flow
 1. Check connection
@@ -91,6 +94,13 @@ All commands accept optional `instance_id`. Omit it to use the `default` session
 ./ghost-cli call ghost_vacuum
 ```
 Returns a numbered list of every interactive element. Elements are indexed starting at 1.
+
+Managed Playwright session attach:
+
+```text
+./ghost-cli call ghost_instance_create --arguments '{"instance_id":"li-b","playwright_session":"linkedin_auth_b"}'
+./ghost-cli call ghost_vacuum --arguments '{"instance_id":"li-b","url":"https://www.linkedin.com/feed/","limit":20}'
+```
 
 3. Interact
 ```text

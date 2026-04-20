@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import base64
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +32,10 @@ if _ghost_dir not in sys.path:
 from helpers.execute import find_element
 from ghost_tool_defs import get_ghost_tools
 from chrome_transport import ChromeTransportRuntime
+from playwright_session_transport import (
+    APPROVED_PLAYWRIGHT_SESSIONS,
+    PlaywrightSessionTransport,
+)
 from shared_runtime import SERVER_LOG_FILE, pid_exists, setup_logging
 from helpers.vacuum import VacuumResult, _build_result, paginate_result, vacuum_from_snapshot_text
 
@@ -305,7 +309,9 @@ class GhostInstance:
     page: Any = None
     _browser: Any = None  # only set for CDP connections
     _chrome_transport: Optional[ChromeTransportRuntime] = None
+    _playwright_session_transport: Optional[PlaywrightSessionTransport] = None
     cdp_url: Optional[str] = None  # e.g. "http://localhost:9222" to attach to external browser
+    playwright_session: Optional[str] = None
     vacuum_cache: Optional[VacuumResult] = None
     page_url: str = ""
     page_title: str = ""
@@ -314,16 +320,25 @@ class GhostInstance:
 
     @property
     def browser_connected(self) -> bool:
-        return self.context is not None or (self._chrome_transport is not None and self._chrome_transport.connected)
+        return (
+            self.context is not None
+            or (self._chrome_transport is not None and self._chrome_transport.connected)
+            or (
+                self._playwright_session_transport is not None
+                and self._playwright_session_transport.connected
+            )
+        )
 
     @property
     def transport_kind(self) -> str:
         if self._liquid_webview_target() is not None:
             return "liquid-cdp"
+        if self._playwright_session_transport is not None and self._playwright_session_transport.connected:
+            return "playwright-session"
         if self._chrome_transport is not None and self._chrome_transport.connected:
             return "chrome-transport"
         if self.context is not None:
-            return "playwright"
+            return "playwright-cdp" if self.cdp_url else "playwright"
         return "disconnected"
 
     def _touch(self) -> None:
@@ -334,6 +349,7 @@ class GhostInstance:
         self.page = None
         self._browser = None
         self._chrome_transport = None
+        self._playwright_session_transport = None
         self.vacuum_cache = None
         self.page_url = ""
         self.page_title = ""
@@ -341,9 +357,30 @@ class GhostInstance:
         self.page_limit = DEFAULT_LIMIT
 
     async def _ensure_browser_locked(self) -> None:
-        if self._liquid_webview_target() is None:
+        if self.playwright_session:
+            if self.playwright_session not in APPROVED_PLAYWRIGHT_SESSIONS:
+                raise RuntimeError(
+                    f"Unsupported Playwright session '{self.playwright_session}'. "
+                    f"Allowed: {sorted(APPROVED_PLAYWRIGHT_SESSIONS)}"
+                )
+            if self._playwright_session_transport is None:
+                self._playwright_session_transport = PlaywrightSessionTransport(
+                    self.playwright_session,
+                    logger=LOGGER,
+                )
+            await self._playwright_session_transport.ensure_browser()
+            self.context = None
+            self.page = None
+            self._browser = None
+            self._chrome_transport = None
+            return
+
+        liquid_target = self._liquid_webview_target()
+        attach_live_chrome = _is_live_chrome_attach(self.cdp_url)
+        use_direct_playwright_cdp = bool(self.cdp_url and not attach_live_chrome)
+
+        if not use_direct_playwright_cdp and liquid_target is None:
             if self._chrome_transport is None:
-                attach_live_chrome = _is_live_chrome_attach(self.cdp_url)
                 # When no explicit CDP URL is set, default to auto_connect (proxy) instead
                 # of launching a fresh Chrome process.
                 if not attach_live_chrome and not self.cdp_url:
@@ -372,38 +409,38 @@ class GhostInstance:
         playwright = await _ensure_playwright()
 
         if self.cdp_url:
-            # Attach to external browser (e.g. Liquid's Electron) via CDP
+            # Attach to an external browser directly via Playwright CDP.
             self._browser = await playwright.chromium.connect_over_cdp(self.cdp_url)
 
-            # Search ALL contexts for the webview page (Electron puts webviews
-            # in a separate context from the main renderer)
-            webview_page = None
-            webview_context = None
+            chosen_page = None
+            chosen_context = None
             for ctx in self._browser.contexts:
                 for page in ctx.pages:
                     url = page.url
-                    # Skip Liquid's own UI, devtools, and blank pages
-                    if (url.startswith("devtools://") or
-                            "localhost:8100" in url or
-                            "localhost:3001" in url or
-                            url.startswith("file://") or
-                            url in ("about:blank", "")):
+                    if url.startswith("devtools://") or url in ("about:blank", ""):
                         continue
-                    webview_page = page
-                    webview_context = ctx
+                    if liquid_target and (
+                        "localhost:8100" in url
+                        or "localhost:3001" in url
+                        or url.startswith("file://")
+                    ):
+                        continue
+                    chosen_page = page
+                    chosen_context = ctx
                     break
-                if webview_page:
+                if chosen_page:
                     break
 
-            if webview_context:
-                self.context = webview_context
-                self.page = webview_page
+            if chosen_context:
+                self.context = chosen_context
+                self.page = chosen_page
             else:
                 # Fallback: use first context
                 self.context = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
+                self.page = self.context.pages[-1] if self.context.pages else None
 
             total_pages = sum(len(ctx.pages) for ctx in self._browser.contexts)
-            LOGGER.info("Ghost CDP-attached instance=%s url=%s contexts=%d pages=%d webview=%s",
+            LOGGER.info("Ghost CDP-attached instance=%s url=%s contexts=%d pages=%d page=%s",
                         self.instance_id, self.cdp_url, len(self._browser.contexts),
                         total_pages, self.page.url if self.page else "none")
         else:
@@ -445,6 +482,9 @@ class GhostInstance:
         """Open a new Chrome tab in the shared browser and pin this instance to it."""
         async with self.lock:
             await self._ensure_browser_locked()
+            if self._playwright_session_transport is not None:
+                if url:
+                    await self._playwright_session_transport.goto(url)
             if self._chrome_transport is not None:
                 await self._chrome_transport.create_tab(url)
             self._touch()
@@ -755,6 +795,30 @@ class GhostInstance:
             self._touch()
             return result.menu_text
 
+        if self._playwright_session_transport is not None:
+            if url:
+                await self._playwright_session_transport.goto(url)
+                await asyncio.sleep(1)
+
+            snapshot = await self._playwright_session_transport.snapshot()
+            if not snapshot:
+                return "Error: Could not get Playwright session snapshot."
+
+            info = await self._playwright_session_transport.page_info()
+            self.page_url = str(info.get("href", ""))
+            self.page_title = str(info.get("title", "")) or self.page_url or "Playwright Page"
+
+            use_limit = limit if (limit and int(limit) > 0) else DEFAULT_LIMIT
+            self.page_limit = int(use_limit)
+            self.current_offset = 0
+
+            result = vacuum_from_snapshot_text(snapshot, url=self.page_url, title=self.page_title)
+            result.menu_text = paginate_result(result, 0, self.page_limit)
+            self.vacuum_cache = result
+            self.current_offset = min(self.page_limit, result.total_count)
+            self._touch()
+            return result.menu_text
+
         page = await self._get_active_page_locked()
 
         if url:
@@ -882,6 +946,33 @@ class GhostInstance:
                 new_menu = await self._vacuum_page_locked()
                 return f"Done: {action_desc}\n\n{new_menu}"
 
+            if self._playwright_session_transport is not None:
+                ref = element.get("ref")
+                if not ref:
+                    return f"Error: Element [{choice}] is missing a Playwright ref. Re-vacuum to refresh the page state."
+
+                if role in ("textbox", "searchbox", "combobox", "spinbutton"):
+                    if not value:
+                        return f"Error: Element [{choice}] is a {role} - provide a value."
+                    await self._playwright_session_transport.fill(ref, value)
+                    if role in ("searchbox", "textbox", "combobox"):
+                        with suppress(Exception):
+                            await self._playwright_session_transport.press_key("Enter")
+                    action_desc = f"Filled '{name}' with '{value}'"
+                elif role in ("checkbox", "radio"):
+                    await self._playwright_session_transport.click(ref)
+                    action_desc = f"Toggled '{name}'"
+                elif role == "link":
+                    await self._playwright_session_transport.click(ref)
+                    action_desc = f"Clicked link '{name}'"
+                else:
+                    await self._playwright_session_transport.click(ref)
+                    action_desc = f"Clicked '{name}'"
+
+                await asyncio.sleep(1)
+                new_menu = await self._vacuum_page_locked()
+                return f"Done: {action_desc}\n\n{new_menu}"
+
             page = await self._get_active_page_locked()
 
             occurrence = 0
@@ -948,6 +1039,8 @@ class GhostInstance:
             if self._liquid_webview_target() is not None:
                 return await self._screenshot_liquid_webview_locked(full_page=full_page)
 
+            await self._ensure_browser_locked()
+
             if self._chrome_transport is not None:
                 uid = None
                 element_description = "viewport"
@@ -978,6 +1071,24 @@ class GhostInstance:
                     f"Instance: {self.instance_id}\n"
                     f"Page: {self.page_url or 'unknown'}\n"
                     f"Element: {element_description}"
+                )
+
+            if self._playwright_session_transport is not None:
+                screenshots_dir = GHOST_DIR / "screenshots"
+                screenshots_dir.mkdir(parents=True, exist_ok=True)
+                safe_instance_id = re.sub(r"[^A-Za-z0-9._-]+", "-", self.instance_id)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                screenshot_path = screenshots_dir / f"ghost_{safe_instance_id}_{timestamp}.png"
+                saved_path = await self._playwright_session_transport.take_screenshot(
+                    str(screenshot_path),
+                    full_page=full_page,
+                )
+                self._touch()
+                return (
+                    f"Screenshot saved: {saved_path or screenshot_path.resolve()}\n"
+                    f"Instance: {self.instance_id}\n"
+                    f"Page: {self.page_url or 'unknown'}\n"
+                    f"Element: viewport"
                 )
 
             page = await self._get_active_page_locked()
@@ -1033,6 +1144,13 @@ class GhostInstance:
                     f"Profile path: {self.context_dir.resolve()}"
                 )
 
+            if self._playwright_session_transport is not None:
+                self._touch()
+                return (
+                    "Playwright session auth is managed by playwright_manager.py and the "
+                    "~/.codex/playwright_state/linkedin.json state file."
+                )
+
             if self.context is None:
                 return "Error: No browser context. Call ghost_vacuum first."
 
@@ -1055,6 +1173,7 @@ class GhostInstance:
                 "transport": self.transport_kind,
                 "browser_connected": self.browser_connected,
                 "cdp_url": self.cdp_url or "none",
+                "playwright_session": self.playwright_session or "none",
                 "context_dir": str(self.context_dir.resolve()),
                 "page_url": self.page_url or "none",
                 "page_title": self.page_title or "none",
@@ -1071,8 +1190,9 @@ class GhostInstance:
             context = self.context
             browser = self._browser
             chrome_mcp = self._chrome_transport
+            playwright_session_transport = self._playwright_session_transport
             if context is None:
-                if chrome_mcp is None:
+                if chrome_mcp is None and playwright_session_transport is None:
                     return False
 
             LOGGER.info("Closing Ghost browser instance=%s: %s", self.instance_id, reason)
@@ -1081,6 +1201,8 @@ class GhostInstance:
         try:
             if chrome_mcp is not None:
                 await chrome_mcp.close()
+            elif playwright_session_transport is not None:
+                await playwright_session_transport.close()
             elif browser is not None:
                 # CDP connection — disconnect, don't close the host browser
                 await browser.close()
@@ -1167,6 +1289,34 @@ async def _maybe_attach_default_instance_to_liquid(instance: GhostInstance) -> b
     return True
 
 
+async def _apply_attachment_arguments(instance: GhostInstance, arguments: dict[str, Any]) -> None:
+    cdp_url = arguments.get("cdp_url")
+    if cdp_url and isinstance(cdp_url, str):
+        if instance.cdp_url != cdp_url and instance.browser_connected:
+            await instance.close_browser("switching browser attachment target")
+        instance.cdp_url = cdp_url
+        instance.playwright_session = None
+        return
+
+    playwright_session = arguments.get("playwright_session")
+    if playwright_session is not None:
+        if not isinstance(playwright_session, str):
+            raise ValueError("'playwright_session' must be a string.")
+        normalized_session = playwright_session.strip()
+        if normalized_session not in APPROVED_PLAYWRIGHT_SESSIONS:
+            raise ValueError(
+                "unsupported playwright_session. "
+                f"Allowed: {sorted(APPROVED_PLAYWRIGHT_SESSIONS)}"
+            )
+        if instance.playwright_session != normalized_session and instance.browser_connected:
+            await instance.close_browser("switching browser attachment target")
+        instance.playwright_session = normalized_session
+        instance.cdp_url = None
+        return
+
+    await _maybe_attach_default_instance_to_liquid(instance)
+
+
 async def _has_open_browsers() -> bool:
     instances = await _list_instances()
     return any(instance.browser_connected for instance in instances)
@@ -1195,14 +1345,7 @@ async def call_tool(name: str, arguments: dict | None) -> str:
                     f"Call ghost_instance_list first to find an existing instance. "
                     f"Available instances: {available}"
                 )
-            # Set CDP URL if provided (attaches to external browser like Liquid)
-            cdp_url = arguments.get("cdp_url")
-            if cdp_url and isinstance(cdp_url, str):
-                if instance.cdp_url != cdp_url and instance.browser_connected:
-                    await instance.close_browser("switching browser attachment target")
-                instance.cdp_url = cdp_url
-            else:
-                await _maybe_attach_default_instance_to_liquid(instance)
+            await _apply_attachment_arguments(instance, arguments)
 
             open_browser = bool(arguments.get("open_browser", True))
             url = arguments.get("url")
@@ -1255,7 +1398,7 @@ async def call_tool(name: str, arguments: dict | None) -> str:
             return json.dumps(payload, indent=2)
 
         instance, _ = await _get_or_create_instance(arguments.get("instance_id"))
-        await _maybe_attach_default_instance_to_liquid(instance)
+        await _apply_attachment_arguments(instance, arguments)
 
         if name == "ghost_vacuum":
             url = arguments.get("url")
@@ -1279,7 +1422,7 @@ async def call_tool(name: str, arguments: dict | None) -> str:
             return result
 
         if name == "ghost_status":
-            if instance.cdp_url and not instance.browser_connected:
+            if (instance.cdp_url or instance.playwright_session) and not instance.browser_connected:
                 await instance.ensure_browser()
             status = await instance.status(_shared_session_count())
             return json.dumps(status, indent=2)
@@ -1297,14 +1440,23 @@ async def call_tool(name: str, arguments: dict | None) -> str:
             script = arguments.get("script", "").strip()
             if not script:
                 return "Error: 'script' is required."
-            if instance._chrome_transport is None:
+            await instance.ensure_browser()
+            if instance._chrome_transport is not None:
+                result = await instance._chrome_transport.call_tool(
+                    "evaluate_script",
+                    {"function": script},
+                    timeout_seconds=30.0,
+                )
+                return result
+            if instance._playwright_session_transport is not None:
+                return await instance._playwright_session_transport.evaluate_script(script)
+            if instance.context is None:
                 return "Error: No browser connected. Call ghost_vacuum first."
-            result = await instance._chrome_transport.call_tool(
-                "evaluate_script",
-                {"function": script},
-                timeout_seconds=30.0,
-            )
-            return result
+            page = await instance._get_active_page_locked()
+            result = await page.evaluate(script)
+            if isinstance(result, str):
+                return result
+            return json.dumps(result, ensure_ascii=False, indent=2)
 
         if name == "ghost_save_auth":
             result = await instance.save_auth()

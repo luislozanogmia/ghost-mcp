@@ -12,6 +12,7 @@ Ghost Browser automation toolkit.
 import argparse
 import asyncio
 import importlib.util
+import inspect
 import json
 import os
 import sys
@@ -20,7 +21,8 @@ from pathlib import Path
 
 def cmd_scout(args):
     """Scout a URL: capture manifest and compile a browser script."""
-    from ghost import scout, compile  # noqa: E402
+    import scout as scout_module  # noqa: E402
+    import compile as compile_module  # noqa: E402
 
     url = args.url
     output_dir = Path(args.output_dir).resolve()
@@ -32,7 +34,7 @@ def cmd_scout(args):
         print(f"[ghost] Browser context: {args.context_dir}")
 
     # Scout the page — returns a manifest dict
-    manifest = scout.scout(
+    manifest = scout_module.scout(
         url,
         wait_seconds=args.wait,
         browser_context_dir=args.context_dir,
@@ -56,7 +58,7 @@ def cmd_scout(args):
 
     # Compile manifest into a runnable script
     compact = not getattr(args, 'full', False)
-    script_source = compile.compile_script(manifest, compact=compact)
+    script_source = compile_module.compile_script(manifest, compact=compact)
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(script_source)
 
@@ -111,30 +113,70 @@ def cmd_run(args):
 
     # Instantiate and call the method
     async def _run():
-        instance = target_cls()
-        if not hasattr(instance, method_name):
-            print(f"[ghost] Error: method '{method_name}' not found on {target_cls.__name__}.", file=sys.stderr)
-            sys.exit(1)
+        from playwright.async_api import async_playwright
 
-        method = getattr(instance, method_name)
+        browser = None
+        context = None
+        instance = None
 
-        # Create a fresh browser context for the run
+        init_signature = inspect.signature(target_cls.__init__)
+        init_params = [
+            param
+            for name, param in init_signature.parameters.items()
+            if name != "self"
+        ]
+        requires_browser_context = any(
+            param.default is inspect._empty
+            and param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            for param in init_params
+        )
+
+        playwright = await async_playwright().start()
+
         try:
-            await instance.launch()
-        except AttributeError:
-            pass  # Script may handle browser setup differently
+            if requires_browser_context:
+                browser = await playwright.chromium.launch()
+                context = await browser.new_context()
+                instance = target_cls(context)
+            else:
+                instance = target_cls()
 
-        try:
+            if not hasattr(instance, method_name):
+                print(f"[ghost] Error: method '{method_name}' not found on {target_cls.__name__}.", file=sys.stderr)
+                sys.exit(1)
+
+            method = getattr(instance, method_name)
+
+            if hasattr(instance, "launch"):
+                await instance.launch()
+            elif hasattr(instance, "open"):
+                await instance.open()
+
             result = method(*method_args)
             # Await if coroutine
             if asyncio.iscoroutine(result) or asyncio.isfuture(result):
                 result = await result
         finally:
-            # Teardown browser context
             try:
-                await instance.close()
+                if instance is not None and hasattr(instance, "close"):
+                    await instance.close()
             except (AttributeError, Exception):
                 pass
+            try:
+                if context is not None:
+                    await context.close()
+            except Exception:
+                pass
+            try:
+                if browser is not None:
+                    await browser.close()
+            except Exception:
+                pass
+            await playwright.stop()
 
         return result
 
@@ -144,7 +186,8 @@ def cmd_run(args):
 
 def cmd_refresh(args):
     """Re-scout the original URL from a generated script and regenerate."""
-    from ghost import scout, compile  # noqa: E402
+    import scout as scout_module  # noqa: E402
+    import compile as compile_module  # noqa: E402
 
     script_path = Path(args.script).resolve()
 
@@ -190,7 +233,7 @@ def cmd_refresh(args):
     # Re-scout
     context_dir = meta.get("context_dir")
     wait = meta.get("wait", 3)
-    manifest = scout.scout(url, wait_seconds=wait, browser_context_dir=context_dir)
+    manifest = scout_module.scout(url, wait_seconds=wait, browser_context_dir=context_dir)
 
     new_tree_hash = manifest.get("tree_hash")
 
@@ -201,7 +244,7 @@ def cmd_refresh(args):
         return
 
     # Regenerate
-    script_source = compile.compile_script(manifest)
+    script_source = compile_module.compile_script(manifest)
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(script_source)
 

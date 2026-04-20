@@ -47,6 +47,13 @@ Run one command:
 ./ghost-cli call ghost_vacuum --arguments '{"instance_id":"live","limit":50}'
 ```
 
+Attach to a managed Playwright LinkedIn session:
+
+```bash
+./ghost-cli call ghost_instance_create --arguments '{"instance_id":"li-b","playwright_session":"linkedin_auth_b"}'
+./ghost-cli call ghost_vacuum --arguments '{"instance_id":"li-b","url":"https://www.linkedin.com/feed/","limit":20}'
+```
+
 Run a long-lived session:
 
 ```bash
@@ -61,12 +68,19 @@ Example REPL commands:
 {"tool":"ghost_click","arguments":{"instance_id":"live","choice":12}}
 ```
 
+```json
+{"tool":"ghost_instance_create","arguments":{"instance_id":"li-b","playwright_session":"linkedin_auth_b"}}
+{"tool":"ghost_vacuum","arguments":{"instance_id":"li-b","limit":20}}
+{"tool":"ghost_eval","arguments":{"instance_id":"li-b","script":"() => ({title: document.title, href: location.href})"}}
+```
+
 ## Supported Model
 
 - Direct CLI runtime
 - Long-lived JSON-line REPL sessions
 - Vacuum and numbered-selector workflows
 - Live Chrome attach via the Ghost runtime
+- Managed Playwright session attach for `linkedin_auth_a` and `linkedin_auth_b`
 
 ## Unsupported Model
 
