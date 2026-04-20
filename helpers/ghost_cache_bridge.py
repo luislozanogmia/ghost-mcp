@@ -27,13 +27,12 @@ import sys
 import os
 from pathlib import Path
 
-# Ghost modules
-_ghost_dir = str(Path(__file__).parent)
-if _ghost_dir not in sys.path:
-    sys.path.insert(0, _ghost_dir)
+_root_dir = str(Path(__file__).resolve().parent.parent)
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
 
-from vacuum import vacuum_from_snapshot_text, VacuumResult
-from execute import build_action_payload, find_element
+from helpers.vacuum import vacuum_from_snapshot_text, VacuumResult
+from helpers.execute import build_action_payload, find_element
 from shared_runtime import pid_exists
 
 # Cache location for vacuum results between calls
@@ -41,13 +40,13 @@ from shared_runtime import pid_exists
 _pid = os.getpid()
 GHOST_CACHE = Path(os.environ.get(
     "GHOST_CACHE",
-    Path(__file__).parent / "test_output" / f"_ghost_cache_{_pid}.json"
+    Path(__file__).resolve().parent.parent / "test_output" / f"_ghost_cache_{_pid}.json"
 ))
 
 
 def _cleanup_stale_caches():
     """Remove cache files left by dead processes."""
-    cache_dir = Path(__file__).parent / "test_output"
+    cache_dir = Path(__file__).resolve().parent.parent / "test_output"
     for f in glob.glob(str(cache_dir / "_ghost_cache_*.json")):
         p = Path(f)
         try:

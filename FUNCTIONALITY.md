@@ -11,6 +11,8 @@ The supported CLI path no longer requires the Python `mcp` package.
 
 Archived legacy server files live under `deprecated/mcp/`.
 
+Non-core parsing and bridge utilities live under `helpers/`.
+
 ## Tool Parity
 
 | Former tool | CLI form | Notes |

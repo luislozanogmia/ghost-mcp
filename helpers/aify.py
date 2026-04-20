@@ -26,13 +26,12 @@ import json
 import sys
 from pathlib import Path
 
-# Add ghost package to path
-_ghost_dir = str(Path(__file__).parent)
-if _ghost_dir not in sys.path:
-    sys.path.insert(0, _ghost_dir)
+_root_dir = str(Path(__file__).resolve().parent.parent)
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
 
-from vacuum import vacuum_from_snapshot_text, VacuumResult
-from execute import build_action_payload, find_element
+from helpers.vacuum import vacuum_from_snapshot_text, VacuumResult
+from helpers.execute import build_action_payload, find_element
 
 
 def aify(snapshot_text: str, url: str = "", title: str = "") -> dict:

@@ -25,9 +25,14 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
-from vacuum import VacuumResult, find_element
+_root_dir = str(Path(__file__).resolve().parent.parent)
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
+
+from helpers.vacuum import VacuumResult, find_element
 
 
 # ---------------------------------------------------------------------------

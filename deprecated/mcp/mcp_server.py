@@ -40,12 +40,15 @@ from starlette.routing import Route
 _ghost_dir = str(Path(__file__).resolve().parent)
 if _ghost_dir not in sys.path:
     sys.path.insert(0, _ghost_dir)
+_root_dir = str(Path(__file__).resolve().parents[2])
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
 
-from execute import find_element
+from helpers.execute import find_element
 from ghost_tool_defs import get_ghost_tools
 from chrome_mcp_runtime import ChromeMcpRuntime
 from shared_runtime import SERVER_LOG_FILE, pid_exists, setup_logging
-from vacuum import VacuumResult, _build_result, paginate_result, vacuum_from_mcp_output
+from helpers.vacuum import VacuumResult, _build_result, paginate_result, vacuum_from_snapshot_text
 
 
 def _parse_args() -> argparse.Namespace:
@@ -787,10 +790,10 @@ class GhostInstance:
             self.page_limit = int(use_limit)
             self.current_offset = 0
 
-            result = vacuum_from_mcp_output(snapshot, url=self.page_url, title=self.page_title)
+            result = vacuum_from_snapshot_text(snapshot, url=self.page_url, title=self.page_title)
 
             # Inject JS-supplemented clickable elements for known SPAs
-            from vacuum import _JS_SUPPLEMENTS
+            from helpers.vacuum import _JS_SUPPLEMENTS
             for domain_key, entry in _JS_SUPPLEMENTS.items():
                 if domain_key in self.page_url:
                     try:

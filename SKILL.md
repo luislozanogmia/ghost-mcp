@@ -48,10 +48,10 @@ playwright install chromium
 - `./ghost-cli call ghost_status`
 - `./ghost-cli call ghost_instance_create --arguments '{"instance_id":"live","cdp_url":"live-chrome"}'`
 - `./ghost-cli repl`
-- `python3 ghost_cache_bridge.py --help`
-- `python3 ghost_cache_bridge.py --self-test`
-- `python3 ghost_cache_bridge.py vacuum <temp_file> --url <url> --title <title>`
-- `python3 ghost_cache_bridge.py action <choice> --value <text>`
+- `python3 helpers/ghost_cache_bridge.py --help`
+- `python3 helpers/ghost_cache_bridge.py --self-test`
+- `python3 helpers/ghost_cache_bridge.py vacuum <temp_file> --url <url> --title <title>`
+- `python3 helpers/ghost_cache_bridge.py action <choice> --value <text>`
 - `python3 deprecated/mcp/ghost_stdio_proxy.py` (archived unsupported shim)
 
 See [FUNCTIONALITY.md](/Users/luis.lozano/.codex/skills/ghost-cli/FUNCTIONALITY.md:1) for the old-tool to CLI mapping.

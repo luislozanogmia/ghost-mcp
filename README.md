@@ -22,6 +22,8 @@ run Ghost.
 
 Archived legacy server files now live under `deprecated/mcp/`.
 
+Non-core utilities now live under `helpers/`.
+
 ## Install
 
 ```bash

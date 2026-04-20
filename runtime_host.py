@@ -29,11 +29,11 @@ _ghost_dir = str(Path(__file__).resolve().parent)
 if _ghost_dir not in sys.path:
     sys.path.insert(0, _ghost_dir)
 
-from execute import find_element
+from helpers.execute import find_element
 from ghost_tool_defs import get_ghost_tools
 from chrome_transport import ChromeTransportRuntime
 from shared_runtime import SERVER_LOG_FILE, pid_exists, setup_logging
-from vacuum import VacuumResult, _build_result, paginate_result, vacuum_from_snapshot_text
+from helpers.vacuum import VacuumResult, _build_result, paginate_result, vacuum_from_snapshot_text
 
 LOGGER = setup_logging("ghost.runtime_host", SERVER_LOG_FILE)
 
@@ -699,7 +699,7 @@ class GhostInstance:
             result = vacuum_from_snapshot_text(snapshot, url=self.page_url, title=self.page_title)
 
             # Inject JS-supplemented clickable elements for known SPAs
-            from vacuum import _JS_SUPPLEMENTS
+            from helpers.vacuum import _JS_SUPPLEMENTS
             for domain_key, entry in _JS_SUPPLEMENTS.items():
                 if domain_key in self.page_url:
                     try:

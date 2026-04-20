@@ -26,7 +26,12 @@ import re
 import sys
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+_root_dir = str(Path(__file__).resolve().parent.parent)
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
 
 # ---------------------------------------------------------------------------
 # Constants
