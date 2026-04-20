@@ -50,6 +50,17 @@ To expose the server to an MCP client, point it at `ghost_stdio_proxy.py`:
 }
 ```
 
+If you are wiring Codex itself, add the `ghost` entry under your `mcp_servers` config and point it at the same proxy command:
+
+```toml
+[mcp_servers.ghost]
+command = "/Users/luis.lozano/.codex/skills/ghost_mcp/.venv/bin/python"
+args = ["/Users/luis.lozano/.codex/skills/ghost_mcp/ghost_stdio_proxy.py"]
+enabled = true
+```
+
+Then reload or restart Codex so the new MCP server is registered.
+
 ## Runner
 - `python3 ghost_mcp.py --help`
 - `python3 ghost_mcp.py --self-test`
