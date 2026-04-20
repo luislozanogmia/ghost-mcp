@@ -32,8 +32,8 @@ _ghost_dir = str(Path(__file__).parent)
 if _ghost_dir not in sys.path:
     sys.path.insert(0, _ghost_dir)
 
-from vacuum import vacuum_from_mcp_output, VacuumResult
-from execute import execute_mcp, find_element
+from vacuum import vacuum_from_snapshot_text, VacuumResult
+from execute import build_action_payload, find_element
 from shared_runtime import pid_exists
 
 # Cache location for vacuum results between calls
@@ -66,15 +66,15 @@ def _cleanup_stale_caches():
 _cleanup_stale_caches()
 
 
-def cmd_vacuum(mcp_file: str, url: str = "", title: str = ""):
+def cmd_vacuum(snapshot_file: str, url: str = "", title: str = ""):
     """Read raw page snapshot text from file, vacuum it, print clean menu, cache result."""
-    mcp_path = Path(mcp_file)
-    if not mcp_path.exists():
-        print(f"Error: {mcp_path} not found", file=sys.stderr)
+    snapshot_path = Path(snapshot_file)
+    if not snapshot_path.exists():
+        print(f"Error: {snapshot_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    mcp_text = mcp_path.read_text(encoding="utf-8")
-    result = vacuum_from_mcp_output(mcp_text, url=url, title=title)
+    snapshot_text = snapshot_path.read_text(encoding="utf-8")
+    result = vacuum_from_snapshot_text(snapshot_text, url=url, title=title)
 
     # Cache the vacuum result for subsequent action() calls
     cache_data = {
@@ -106,18 +106,18 @@ def cmd_action(choice: int, value: str = None):
         element_count=cache_data.get("element_count", 0),
     )
 
-    mcp_action = execute_mcp(choice, result, value=value)
+    action_payload = build_action_payload(choice, result, value=value)
 
-    if mcp_action.get("error"):
-        print(json.dumps({"error": mcp_action["error"]}))
+    if action_payload.get("error"):
+        print(json.dumps({"error": action_payload["error"]}))
         sys.exit(1)
 
     # Print the action dict — LLM uses ref to call computer tool
     print(json.dumps({
-        "ref": mcp_action["ref_id"],
-        "action": mcp_action["action_type"],
-        "value": mcp_action.get("value"),
-        "description": mcp_action["description"],
+        "ref": action_payload["ref_id"],
+        "action": action_payload["action_type"],
+        "value": action_payload.get("value"),
+        "description": action_payload["description"],
     }, ensure_ascii=False))
 
 
@@ -131,7 +131,7 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     p_vac = sub.add_parser("vacuum", help="Vacuum raw page snapshot text into a clean menu")
-    p_vac.add_argument("mcp_file", help="Path to file containing raw page snapshot text")
+    p_vac.add_argument("snapshot_file", help="Path to file containing raw page snapshot text")
     p_vac.add_argument("--url", default="", help="Page URL")
     p_vac.add_argument("--title", default="", help="Page title")
 
@@ -156,7 +156,7 @@ def main():
         return
 
     if args.command == "vacuum":
-        cmd_vacuum(args.mcp_file, url=args.url, title=args.title)
+        cmd_vacuum(args.snapshot_file, url=args.url, title=args.title)
     elif args.command == "action":
         cmd_action(args.choice, value=getattr(args, "value", None))
     else:

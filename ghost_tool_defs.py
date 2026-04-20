@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from mcp.types import Tool
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ToolDef:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
 
 
 INSTANCE_ID_PROPERTY = {
@@ -12,16 +20,16 @@ INSTANCE_ID_PROPERTY = {
 }
 
 
-def get_ghost_tools() -> list[Tool]:
+def get_ghost_tools() -> list[ToolDef]:
     return [
-        Tool(
+        ToolDef(
             name="ghost_instance_create",
             description=(
                 "Create or reuse a named Ghost browser instance backed by its own "
                 "independent Chrome profile. Optionally open the browser immediately "
                 "and navigate to a URL."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": {
@@ -61,18 +69,18 @@ def get_ghost_tools() -> list[Tool]:
                 },
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_instance_list",
             description="List all known Ghost browser instances and their current page state.",
-            inputSchema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {}},
         ),
-        Tool(
+        ToolDef(
             name="ghost_instance_close",
             description=(
                 "Close a named Ghost browser instance and unregister it from the local "
                 "Ghost runtime. This does not delete its profile directory."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": {
@@ -83,7 +91,7 @@ def get_ghost_tools() -> list[Tool]:
                 "required": ["instance_id"],
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_vacuum",
             description=(
                 "Vacuum the current browser page into a numbered text menu. "
@@ -92,7 +100,7 @@ def get_ghost_tools() -> list[Tool]:
                 "Shows first N elements (default 50); use ghost_more for next page. "
                 "Use this instead of reading raw page HTML/DOM."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": INSTANCE_ID_PROPERTY,
@@ -107,14 +115,14 @@ def get_ghost_tools() -> list[Tool]:
                 },
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_more",
             description=(
                 "Get the next page of elements from the last vacuum result. "
                 "Does NOT re-vacuum the page - uses the cached element list. "
                 "Element numbers stay globally consistent (element [75] is always [75])."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": INSTANCE_ID_PROPERTY,
@@ -125,7 +133,7 @@ def get_ghost_tools() -> list[Tool]:
                 },
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_click",
             description=(
                 "Execute an action from the Ghost menu by number. "
@@ -133,7 +141,7 @@ def get_ghost_tools() -> list[Tool]:
                 "After executing, automatically re-vacuums and returns the updated menu. "
                 "Works with ANY element number, even if not shown on the current page."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": INSTANCE_ID_PROPERTY,
@@ -149,33 +157,33 @@ def get_ghost_tools() -> list[Tool]:
                 "required": ["choice"],
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_status",
             description=(
                 "Show current Ghost state for one instance: cached page URL, element count, "
                 "browser connection status, and runtime session count."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": INSTANCE_ID_PROPERTY,
                 },
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_save_auth",
             description=(
                 "Export browser auth (cookies, localStorage) from one instance to linkedin_auth.json. "
                 "Call after logging into a site to persist the session across restarts."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": INSTANCE_ID_PROPERTY,
                 },
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_eval",
             description=(
                 "Run a JavaScript function on the current page and return the result. "
@@ -184,7 +192,7 @@ def get_ghost_tools() -> list[Tool]:
                 "Pass a JS arrow function string: '() => document.title' or "
                 "'() => [...document.querySelectorAll(\"span[title]\")].map(e=>e.title).join(\"\\\\n\")'"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "required": ["script"],
                 "properties": {
@@ -196,14 +204,14 @@ def get_ghost_tools() -> list[Tool]:
                 },
             },
         ),
-        Tool(
+        ToolDef(
             name="ghost_screenshot",
             description=(
                 "Take a screenshot of the current browser page. "
                 "Optionally scroll to a specific menu element first. "
                 "Returns the file path - use Read tool to view the image."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "instance_id": INSTANCE_ID_PROPERTY,

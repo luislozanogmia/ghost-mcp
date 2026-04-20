@@ -2,7 +2,7 @@
 Ghost AIfy — The glue between raw page snapshot text and Ghost vacuum/execute.
 
 Two entry points:
-    1. aify(mcp_text, url, title) -> menu_text
+    1. aify(snapshot_text, url, title) -> menu_text
        Parses raw page snapshot text and returns a clean numbered menu.
 
     2. action(choice, vacuum_json, value=None) -> dict
@@ -31,11 +31,11 @@ _ghost_dir = str(Path(__file__).parent)
 if _ghost_dir not in sys.path:
     sys.path.insert(0, _ghost_dir)
 
-from vacuum import vacuum_from_mcp_output, VacuumResult
-from execute import execute_mcp, find_element
+from vacuum import vacuum_from_snapshot_text, VacuumResult
+from execute import build_action_payload, find_element
 
 
-def aify(mcp_text: str, url: str = "", title: str = "") -> dict:
+def aify(snapshot_text: str, url: str = "", title: str = "") -> dict:
     """
     Parse raw page snapshot text and return structured result.
 
@@ -44,7 +44,7 @@ def aify(mcp_text: str, url: str = "", title: str = "") -> dict:
         vacuum_json: dict  -- serialized VacuumResult for action() calls
         element_count: int
     """
-    result = vacuum_from_mcp_output(mcp_text, url=url, title=title)
+    result = vacuum_from_snapshot_text(snapshot_text, url=url, title=title)
     return {
         "menu_text": result.menu_text,
         "vacuum_json": {
@@ -76,16 +76,16 @@ def action(choice: int, vacuum_json: dict, value: str = None) -> dict:
         element_count=vacuum_json.get("element_count", 0),
     )
 
-    mcp_action = execute_mcp(choice, result, value=value)
+    action_payload = build_action_payload(choice, result, value=value)
 
-    if mcp_action.get("error"):
-        return {"error": mcp_action["error"]}
+    if action_payload.get("error"):
+        return {"error": action_payload["error"]}
 
     return {
-        "ref": mcp_action["ref_id"],
-        "action": mcp_action["action_type"],
-        "value": mcp_action.get("value"),
-        "description": mcp_action["description"],
+        "ref": action_payload["ref_id"],
+        "action": action_payload["action_type"],
+        "value": action_payload.get("value"),
+        "description": action_payload["description"],
     }
 
 
@@ -115,8 +115,8 @@ def main():
     args = parser.parse_args()
 
     if args.command == "vacuum":
-        mcp_text = args.text if args.text else sys.stdin.read()
-        result = aify(mcp_text, url=args.url, title=args.title)
+        snapshot_text = args.text if args.text else sys.stdin.read()
+        result = aify(snapshot_text, url=args.url, title=args.title)
 
         if args.json:
             print(json.dumps(result, indent=2, ensure_ascii=False))

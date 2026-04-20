@@ -7,6 +7,8 @@ direct CLI runtime exposes the same browser actions without the shared HTTP
 daemon and backend-session reconnect layer that kept disconnecting during long
 runs.
 
+The supported CLI path no longer requires the Python `mcp` package.
+
 Archived legacy server files live under `deprecated/mcp/`.
 
 ## Tool Parity

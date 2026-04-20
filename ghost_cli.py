@@ -5,7 +5,6 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 _ghost_dir = str(Path(__file__).resolve().parent)
 if _ghost_dir not in sys.path:
@@ -14,25 +13,16 @@ if _ghost_dir not in sys.path:
 import runtime_host as runtime
 
 
-def _extract_text(contents: list[Any]) -> str:
-    parts: list[str] = []
-    for item in contents:
-        text = getattr(item, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(part for part in parts if part).strip()
-
-
-def _tool_payload(tool: Any) -> dict[str, Any]:
+def _tool_payload(tool) -> dict[str, object]:
     return {
-        "name": getattr(tool, "name", ""),
-        "description": getattr(tool, "description", "") or "",
-        "input_schema": getattr(tool, "inputSchema", {}) or {},
+        "name": tool.name,
+        "description": tool.description or "",
+        "input_schema": tool.input_schema or {},
     }
 
 
-async def _invoke_tool(name: str, arguments: dict[str, Any] | None) -> str:
-    return _extract_text(await runtime.call_tool(name, arguments or {}))
+async def _invoke_tool(name: str, arguments: dict[str, object] | None) -> str:
+    return await runtime.call_tool(name, arguments or {})
 
 
 async def _shutdown_runtime(reason: str) -> None:
@@ -40,12 +30,12 @@ async def _shutdown_runtime(reason: str) -> None:
     await runtime._stop_playwright()
 
 
-async def _list_tools_payload() -> list[dict[str, Any]]:
+async def _list_tools_payload() -> list[dict[str, object]]:
     tools = await runtime.list_tools()
     return [_tool_payload(tool) for tool in tools]
 
 
-def _load_arguments(raw: str | None) -> dict[str, Any]:
+def _load_arguments(raw: str | None) -> dict[str, object]:
     if not raw:
         return {}
     parsed = json.loads(raw)
@@ -54,8 +44,8 @@ def _load_arguments(raw: str | None) -> dict[str, Any]:
     return parsed
 
 
-def _response_payload(tool: str, text: str) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+def _response_payload(tool: str, text: str) -> dict[str, object]:
+    payload: dict[str, object] = {
         "ok": not text.startswith("Error:") and not text.startswith("Ghost error:"),
         "tool": tool,
         "output": text,

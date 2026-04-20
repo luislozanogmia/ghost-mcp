@@ -7,14 +7,11 @@ entrypoints were archived under `deprecated/mcp/`.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-import glob
 import json
 import os
 import re
 import secrets
-import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -26,14 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-import anyio
 import websockets
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import TextContent
-from starlette.applications import Starlette
-from starlette.routing import Route
 
 _ghost_dir = str(Path(__file__).resolve().parent)
 if _ghost_dir not in sys.path:
@@ -41,61 +31,10 @@ if _ghost_dir not in sys.path:
 
 from execute import find_element
 from ghost_tool_defs import get_ghost_tools
-from chrome_transport import ChromeMcpRuntime
+from chrome_transport import ChromeTransportRuntime
 from shared_runtime import SERVER_LOG_FILE, pid_exists, setup_logging
-from vacuum import VacuumResult, _build_result, paginate_result, vacuum_from_mcp_output
+from vacuum import VacuumResult, _build_result, paginate_result, vacuum_from_snapshot_text
 
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Ghost legacy compatibility server")
-    parser.add_argument(
-        "--transport",
-        choices=["stdio", "streamable-http"],
-        default="stdio",
-        help="How to expose the legacy Ghost compatibility server.",
-    )
-    parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Bind host for Streamable HTTP mode.",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8765,
-        help="Bind port for Streamable HTTP mode.",
-    )
-    parser.add_argument(
-        "--http-path",
-        default="/mcp",
-        help="HTTP path for Streamable HTTP mode.",
-    )
-    parser.add_argument(
-        "--new_instance",
-        action="store_true",
-        help="Launch isolated browser profile roots for this server process.",
-    )
-    parser.add_argument(
-        "--close-grace-seconds",
-        type=float,
-        default=5.0,
-        help="How long to wait after the last active HTTP session closes before shutting browser instances down.",
-    )
-    return parser.parse_args()
-
-
-def _default_args() -> argparse.Namespace:
-    return argparse.Namespace(
-        transport="stdio",
-        host="127.0.0.1",
-        port=8765,
-        http_path="/mcp",
-        new_instance=False,
-        close_grace_seconds=5.0,
-    )
-
-
-ARGS = _parse_args() if __name__ == "__main__" else _default_args()
 LOGGER = setup_logging("ghost.runtime_host", SERVER_LOG_FILE)
 
 
@@ -110,12 +49,8 @@ def _install_exception_logging() -> None:
 
 _install_exception_logging()
 
-
-APP = Server("ghost")
-
 DEFAULT_INSTANCE_ID = "default"
 DEFAULT_LIMIT = 50
-PROCESS_PID = os.getpid()
 GHOST_DIR = Path(__file__).parent
 AUTH_PATH = GHOST_DIR / "browser_context" / "linkedin_auth.json"
 AUTOMATION_AUTH_PATH = GHOST_DIR / "automations" / "linkedin" / "playwright_auth.json"
@@ -129,32 +64,8 @@ LIQUID_STATUS_CANDIDATES = (
     "http://localhost:8100/browser/status",
 )
 CDP_WS_MAX_FRAME_BYTES = 16 * 1024 * 1024
-
-
-def _cleanup_stale_context_roots() -> None:
-    for candidate in glob.glob(str(GHOST_DIR / "browser_context_isolated_*")):
-        path = Path(candidate)
-        try:
-            dir_pid = int(path.name.rsplit("_", 1)[1])
-        except (ValueError, IndexError):
-            continue
-        if dir_pid == PROCESS_PID:
-            continue
-        if not pid_exists(dir_pid):
-            shutil.rmtree(path, ignore_errors=True)
-
-
-if ARGS.new_instance:
-    _cleanup_stale_context_roots()
-    ISOLATED_ROOT = GHOST_DIR / f"browser_context_isolated_{PROCESS_PID}"
-    DEFAULT_CONTEXT_DIR = ISOLATED_ROOT / DEFAULT_INSTANCE_ID
-    NAMED_CONTEXT_ROOT = ISOLATED_ROOT / "instances"
-else:
-    ISOLATED_ROOT = None
-    DEFAULT_CONTEXT_DIR = GHOST_DIR / "browser_context"
-    NAMED_CONTEXT_ROOT = GHOST_DIR / "browser_context_instances"
-
-_session_manager: Optional[StreamableHTTPSessionManager] = None
+DEFAULT_CONTEXT_DIR = GHOST_DIR / "browser_context"
+NAMED_CONTEXT_ROOT = GHOST_DIR / "browser_context_instances"
 _playwright = None
 _playwright_lock = asyncio.Lock()
 _instances_lock = asyncio.Lock()
@@ -393,7 +304,7 @@ class GhostInstance:
     context: Any = None
     page: Any = None
     _browser: Any = None  # only set for CDP connections
-    _chrome_mcp: Optional[ChromeMcpRuntime] = None
+    _chrome_transport: Optional[ChromeTransportRuntime] = None
     cdp_url: Optional[str] = None  # e.g. "http://localhost:9222" to attach to external browser
     vacuum_cache: Optional[VacuumResult] = None
     page_url: str = ""
@@ -403,13 +314,13 @@ class GhostInstance:
 
     @property
     def browser_connected(self) -> bool:
-        return self.context is not None or (self._chrome_mcp is not None and self._chrome_mcp.connected)
+        return self.context is not None or (self._chrome_transport is not None and self._chrome_transport.connected)
 
     @property
     def transport_kind(self) -> str:
         if self._liquid_webview_target() is not None:
             return "liquid-cdp"
-        if self._chrome_mcp is not None and self._chrome_mcp.connected:
+        if self._chrome_transport is not None and self._chrome_transport.connected:
             return "chrome-transport"
         if self.context is not None:
             return "playwright"
@@ -422,7 +333,7 @@ class GhostInstance:
         self.context = None
         self.page = None
         self._browser = None
-        self._chrome_mcp = None
+        self._chrome_transport = None
         self.vacuum_cache = None
         self.page_url = ""
         self.page_title = ""
@@ -431,20 +342,20 @@ class GhostInstance:
 
     async def _ensure_browser_locked(self) -> None:
         if self._liquid_webview_target() is None:
-            if self._chrome_mcp is None:
+            if self._chrome_transport is None:
                 attach_live_chrome = _is_live_chrome_attach(self.cdp_url)
                 # When no explicit CDP URL is set, default to auto_connect (proxy) instead
                 # of launching a fresh Chrome process.
                 if not attach_live_chrome and not self.cdp_url:
                     attach_live_chrome = True
-                self._chrome_mcp = ChromeMcpRuntime(
+                self._chrome_transport = ChromeTransportRuntime(
                     instance_id=self.instance_id,
                     context_dir=self.context_dir,
                     browser_url=None if attach_live_chrome else self.cdp_url,
                     auto_connect=attach_live_chrome,
                     logger=LOGGER,
                 )
-            await self._chrome_mcp.ensure_browser()
+            await self._chrome_transport.ensure_browser()
             self.context = None
             self.page = None
             self._browser = None
@@ -534,8 +445,8 @@ class GhostInstance:
         """Open a new Chrome tab in the shared browser and pin this instance to it."""
         async with self.lock:
             await self._ensure_browser_locked()
-            if self._chrome_mcp is not None:
-                await self._chrome_mcp.create_tab(url)
+            if self._chrome_transport is not None:
+                await self._chrome_transport.create_tab(url)
             self._touch()
 
     async def _get_active_page_locked(self):
@@ -736,8 +647,8 @@ class GhostInstance:
             self._touch()
             return result.menu_text
 
-        if self._chrome_mcp is not None:
-            page = await self._chrome_mcp.ensure_page(url=url)
+        if self._chrome_transport is not None:
+            page = await self._chrome_transport.ensure_page(url=url)
             self.page_url = str(page.get("url", ""))
             self.page_title = self.page_url or "Chrome Page"
 
@@ -750,7 +661,7 @@ class GhostInstance:
                 snap_fd, snap_path = tempfile.mkstemp(prefix="ghost_snap_", suffix=".txt")
                 _os.close(snap_fd)
                 try:
-                    await self._chrome_mcp.take_snapshot(file_path=snap_path)
+                    await self._chrome_transport.take_snapshot(file_path=snap_path)
                     with open(snap_path, "r", encoding="utf-8") as fh:
                         return fh.read()
                 finally:
@@ -774,7 +685,7 @@ class GhostInstance:
                 if uid is None:
                     break
                 LOGGER.info("Ghost: dismissing 'Use here' dialog (attempt %d), uid=%s", _attempt + 1, uid)
-                await self._chrome_mcp.call_tool("click", {"uid": uid, "includeSnapshot": False}, timeout_seconds=10.0)
+                await self._chrome_transport.call_tool("click", {"uid": uid, "includeSnapshot": False}, timeout_seconds=10.0)
                 await asyncio.sleep(1.5)
                 snapshot = await _take_snapshot_to_file()
 
@@ -785,14 +696,14 @@ class GhostInstance:
             self.page_limit = int(use_limit)
             self.current_offset = 0
 
-            result = vacuum_from_mcp_output(snapshot, url=self.page_url, title=self.page_title)
+            result = vacuum_from_snapshot_text(snapshot, url=self.page_url, title=self.page_title)
 
             # Inject JS-supplemented clickable elements for known SPAs
             from vacuum import _JS_SUPPLEMENTS
             for domain_key, entry in _JS_SUPPLEMENTS.items():
                 if domain_key in self.page_url:
                     try:
-                        raw = await self._chrome_mcp.call_tool(
+                        raw = await self._chrome_transport.call_tool(
                             "evaluate_script",
                             {"function": entry["script"]},
                             timeout_seconds=15.0,
@@ -902,7 +813,7 @@ class GhostInstance:
                 new_menu = await self._vacuum_page_locked()
                 return f"Done: {action_desc}\n\n{new_menu}"
 
-            if self._chrome_mcp is not None:
+            if self._chrome_transport is not None:
                 ref = element.get("ref")
                 js_click = element.get("js_click")
 
@@ -912,7 +823,7 @@ class GhostInstance:
                     # (JS synthetic events fail on React apps like WhatsApp Web)
                     resolved_uid = None
                     try:
-                        snapshot_text = await self._chrome_mcp.take_snapshot()
+                        snapshot_text = await self._chrome_transport.take_snapshot()
                         # Search for element by name in snapshot lines
                         import re as _re
                         name_escaped = _re.escape(name)
@@ -930,14 +841,14 @@ class GhostInstance:
 
                     if resolved_uid:
                         try:
-                            await self._chrome_mcp.click(resolved_uid)
+                            await self._chrome_transport.click(resolved_uid)
                             action_desc = f"Clicked '{name}' (CDP uid={resolved_uid})"
                         except Exception as e:
                             return f"Error: CDP click failed on [{choice}] uid={resolved_uid}: {e}"
                     else:
                         # Fallback: JS-based click for dynamic elements
                         try:
-                            await self._chrome_mcp.call_tool(
+                            await self._chrome_transport.call_tool(
                                 "evaluate_script",
                                 {"function": f"() => {{ {js_click} }}"},
                                 timeout_seconds=30.0,
@@ -952,19 +863,19 @@ class GhostInstance:
                     if role in ("textbox", "searchbox", "combobox", "spinbutton"):
                         if not value:
                             return f"Error: Element [{choice}] is a {role} - provide a value."
-                        await self._chrome_mcp.fill(ref, value)
+                        await self._chrome_transport.fill(ref, value)
                         if role in ("searchbox", "textbox", "combobox"):
                             with suppress(Exception):
-                                await self._chrome_mcp.press_key("Enter")
+                                await self._chrome_transport.press_key("Enter")
                         action_desc = f"Filled '{name}' with '{value}'"
                     elif role in ("checkbox", "radio"):
-                        await self._chrome_mcp.click(ref)
+                        await self._chrome_transport.click(ref)
                         action_desc = f"Toggled '{name}'"
                     elif role == "link":
-                        await self._chrome_mcp.click(ref)
+                        await self._chrome_transport.click(ref)
                         action_desc = f"Clicked link '{name}'"
                     else:
-                        await self._chrome_mcp.click(ref)
+                        await self._chrome_transport.click(ref)
                         action_desc = f"Clicked '{name}'"
 
                 await asyncio.sleep(1)
@@ -1037,7 +948,7 @@ class GhostInstance:
             if self._liquid_webview_target() is not None:
                 return await self._screenshot_liquid_webview_locked(full_page=full_page)
 
-            if self._chrome_mcp is not None:
+            if self._chrome_transport is not None:
                 uid = None
                 element_description = "viewport"
                 if element_num is not None:
@@ -1056,7 +967,7 @@ class GhostInstance:
                 safe_instance_id = re.sub(r"[^A-Za-z0-9._-]+", "-", self.instance_id)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 screenshot_path = screenshots_dir / f"ghost_{safe_instance_id}_{timestamp}.png"
-                await self._chrome_mcp.take_screenshot(
+                await self._chrome_transport.take_screenshot(
                     file_path=str(screenshot_path),
                     uid=uid,
                     full_page=full_page,
@@ -1115,7 +1026,7 @@ class GhostInstance:
 
     async def save_auth(self) -> str:
         async with self.lock:
-            if self._chrome_mcp is not None:
+            if self._chrome_transport is not None:
                 self._touch()
                 return (
                     "Chrome transport persists auth in the browser profile automatically. "
@@ -1159,7 +1070,7 @@ class GhostInstance:
         async with self.lock:
             context = self.context
             browser = self._browser
-            chrome_mcp = self._chrome_mcp
+            chrome_mcp = self._chrome_transport
             if context is None:
                 if chrome_mcp is None:
                     return False
@@ -1180,20 +1091,8 @@ class GhostInstance:
         return True
 
 
-def _active_http_session_count(manager: StreamableHTTPSessionManager) -> int:
-    active = 0
-    for session_id, transport in list(manager._server_instances.items()):
-        if transport.is_terminated:
-            manager._server_instances.pop(session_id, None)
-            continue
-        active += 1
-    return active
-
-
 def _shared_session_count() -> Optional[int]:
-    if _session_manager is None or ARGS.transport != "streamable-http":
-        return None
-    return _active_http_session_count(_session_manager)
+    return None
 
 
 async def _get_or_create_instance(
@@ -1273,69 +1172,11 @@ async def _has_open_browsers() -> bool:
     return any(instance.browser_connected for instance in instances)
 
 
-async def _session_watchdog(manager: StreamableHTTPSessionManager) -> None:
-    close_grace_seconds = max(ARGS.close_grace_seconds, 0.0)
-    loop = asyncio.get_running_loop()
-    last_active_at = loop.time()
-    previous_active = -1
-
-    while True:
-        active_sessions = _active_http_session_count(manager)
-        if active_sessions != previous_active:
-            LOGGER.info("Ghost shared sessions active=%s", active_sessions)
-            previous_active = active_sessions
-
-        if active_sessions > 0:
-            last_active_at = loop.time()
-        elif await _has_open_browsers() and (loop.time() - last_active_at) >= close_grace_seconds:
-            await _close_all_instance_browsers("last active shared server session closed")
-            last_active_at = loop.time()
-
-        await anyio.sleep(1)
-
-
-def _build_streamable_http_app() -> Starlette:
-    global _session_manager
-
-    _session_manager = StreamableHTTPSessionManager(
-        APP,
-        json_response=False,
-        stateless=False,
-    )
-
-    @asynccontextmanager
-    async def lifespan(_: Starlette):
-        assert _session_manager is not None
-        async with _session_manager.run():
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(_session_watchdog, _session_manager)
-                yield
-                task_group.cancel_scope.cancel()
-
-    class StreamableHTTPEndpoint:
-        async def __call__(self, scope, receive, send):
-            assert _session_manager is not None
-            await _session_manager.handle_request(scope, receive, send)
-
-    return Starlette(
-        routes=[
-            Route(
-                ARGS.http_path,
-                endpoint=StreamableHTTPEndpoint(),
-                methods=["GET", "POST", "DELETE"],
-            )
-        ],
-        lifespan=lifespan,
-    )
-
-
-@APP.list_tools()
 async def list_tools():
     return get_ghost_tools()
 
 
-@APP.call_tool()
-async def call_tool(name: str, arguments: dict | None):
+async def call_tool(name: str, arguments: dict | None) -> str:
     arguments = arguments or {}
 
     try:
@@ -1349,11 +1190,11 @@ async def call_tool(name: str, arguments: dict | None):
                 # Immediately tear down the instance we just accidentally created
                 await _close_instance(instance.instance_id, "reuse_only=True but instance did not exist")
                 available = [i.instance_id for i in await _list_instances()]
-                return [TextContent(type="text", text=(
+                return (
                     f"Error: reuse_only=True but instance '{instance.instance_id}' does not exist. "
                     f"Call ghost_instance_list first to find an existing instance. "
                     f"Available instances: {available}"
-                ))]
+                )
             # Set CDP URL if provided (attaches to external browser like Liquid)
             cdp_url = arguments.get("cdp_url")
             if cdp_url and isinstance(cdp_url, str):
@@ -1366,7 +1207,7 @@ async def call_tool(name: str, arguments: dict | None):
             open_browser = bool(arguments.get("open_browser", True))
             url = arguments.get("url")
             if url is not None and not isinstance(url, str):
-                return [TextContent(type="text", text="Error: 'url' must be a string.")]
+                return "Error: 'url' must be a string."
             if url:
                 if created:
                     # New instance → open a fresh Chrome tab instead of hijacking the current one
@@ -1382,7 +1223,7 @@ async def call_tool(name: str, arguments: dict | None):
                 "instance_id": instance.instance_id,
                 "status": await instance.status(_shared_session_count()),
             }
-            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+            return json.dumps(payload, indent=2)
 
         if name == "ghost_instance_list":
             statuses = []
@@ -1393,16 +1234,16 @@ async def call_tool(name: str, arguments: dict | None):
                 "count": len(statuses),
                 "instances": statuses,
             }
-            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+            return json.dumps(payload, indent=2)
 
         if name == "ghost_instance_close":
             requested_instance_id = arguments.get("instance_id")
             if requested_instance_id is None:
-                return [TextContent(type="text", text="Error: 'instance_id' is required.")]
+                return "Error: 'instance_id' is required."
             instance = await _get_instance(requested_instance_id)
             if instance is None:
                 normalized = _normalize_instance_id(requested_instance_id)
-                return [TextContent(type="text", text=f"Error: Instance '{normalized}' does not exist.")]
+                return f"Error: Instance '{normalized}' does not exist."
 
             previous_status = await instance.status(_shared_session_count())
             await _close_instance(instance.instance_id, "instance closed by tool call")
@@ -1411,7 +1252,7 @@ async def call_tool(name: str, arguments: dict | None):
                 "instance_id": instance.instance_id,
                 "previous_status": previous_status,
             }
-            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+            return json.dumps(payload, indent=2)
 
         instance, _ = await _get_or_create_instance(arguments.get("instance_id"))
         await _maybe_attach_default_instance_to_liquid(instance)
@@ -1419,29 +1260,29 @@ async def call_tool(name: str, arguments: dict | None):
         if name == "ghost_vacuum":
             url = arguments.get("url")
             if url is not None and not isinstance(url, str):
-                return [TextContent(type="text", text="Error: 'url' must be a string.")]
+                return "Error: 'url' must be a string."
             limit = arguments.get("limit")
             result = await instance.vacuum_page(url=url, limit=limit)
-            return [TextContent(type="text", text=result)]
+            return result
 
         if name == "ghost_more":
             offset = arguments.get("offset")
             result = await instance.more(offset=offset)
-            return [TextContent(type="text", text=result)]
+            return result
 
         if name == "ghost_click":
             choice = arguments.get("choice")
             value = arguments.get("value")
             if choice is None:
-                return [TextContent(type="text", text="Error: 'choice' is required.")]
+                return "Error: 'choice' is required."
             result = await instance.click_element(int(choice), value=value)
-            return [TextContent(type="text", text=result)]
+            return result
 
         if name == "ghost_status":
             if instance.cdp_url and not instance.browser_connected:
                 await instance.ensure_browser()
             status = await instance.status(_shared_session_count())
-            return [TextContent(type="text", text=json.dumps(status, indent=2))]
+            return json.dumps(status, indent=2)
 
         if name == "ghost_screenshot":
             element_num = arguments.get("element")
@@ -1450,74 +1291,27 @@ async def call_tool(name: str, arguments: dict | None):
                 element_num=int(element_num) if element_num is not None else None,
                 full_page=full_page,
             )
-            return [TextContent(type="text", text=result)]
+            return result
 
         if name == "ghost_eval":
             script = arguments.get("script", "").strip()
             if not script:
-                return [TextContent(type="text", text="Error: 'script' is required.")]
-            if instance._chrome_mcp is None:
-                return [TextContent(type="text", text="Error: No browser connected. Call ghost_vacuum first.")]
-            result = await instance._chrome_mcp.call_tool(
+                return "Error: 'script' is required."
+            if instance._chrome_transport is None:
+                return "Error: No browser connected. Call ghost_vacuum first."
+            result = await instance._chrome_transport.call_tool(
                 "evaluate_script",
                 {"function": script},
                 timeout_seconds=30.0,
             )
-            return [TextContent(type="text", text=result)]
+            return result
 
         if name == "ghost_save_auth":
             result = await instance.save_auth()
-            return [TextContent(type="text", text=result)]
+            return result
 
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        return f"Unknown tool: {name}"
 
     except Exception as exc:
         LOGGER.exception("Ghost tool call failed: %s", name)
-        return [TextContent(type="text", text=f"Ghost error: {_sanitize_error(str(exc))}")]
-
-
-async def _run_stdio() -> None:
-    async with stdio_server() as (read_stream, write_stream):
-        await APP.run(read_stream, write_stream, APP.create_initialization_options())
-
-
-async def _run_streamable_http() -> None:
-    import uvicorn
-
-    starlette_app = _build_streamable_http_app()
-    config = uvicorn.Config(
-        starlette_app,
-        host=ARGS.host,
-        port=ARGS.port,
-        log_level="info",
-    )
-    server = uvicorn.Server(config)
-    LOGGER.info(
-        "Starting Ghost shared server daemon on http://%s:%s%s",
-        ARGS.host,
-        ARGS.port,
-        ARGS.http_path,
-    )
-    await server.serve()
-
-
-async def main() -> None:
-    try:
-        LOGGER.info(
-            "Ghost compatibility server starting transport=%s new_instance=%s default_context_dir=%s named_context_root=%s",
-            ARGS.transport,
-            ARGS.new_instance,
-            DEFAULT_CONTEXT_DIR.resolve(),
-            NAMED_CONTEXT_ROOT.resolve(),
-        )
-        if ARGS.transport == "streamable-http":
-            await _run_streamable_http()
-            return
-        await _run_stdio()
-    finally:
-        await _close_all_instance_browsers("process exiting")
-        await _stop_playwright()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        return f"Ghost error: {_sanitize_error(str(exc))}"

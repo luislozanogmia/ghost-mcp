@@ -14,7 +14,7 @@ Usage:
     result = vacuum_from_tree(tree_dict)
 
     # From raw page snapshot text
-    result = vacuum_from_mcp_output(mcp_text)
+    result = vacuum_from_snapshot_text(snapshot_text)
 
     # CLI: vacuum a URL
     python vacuum.py https://example.com
@@ -486,7 +486,7 @@ def vacuum_from_tree(
     return _build_result(tree_dict, url, title, limit=limit, offset=offset)
 
 
-def vacuum_from_mcp_output(mcp_text: str, url: str = "", title: str = "") -> VacuumResult:
+def vacuum_from_snapshot_text(snapshot_text: str, url: str = "", title: str = "") -> VacuumResult:
     """
     Parse raw page snapshot text into a VacuumResult.
 
@@ -549,7 +549,7 @@ def vacuum_from_mcp_output(mcp_text: str, url: str = "", title: str = "") -> Vac
         "search": "SEARCH",
     }
 
-    for line in mcp_text.splitlines():
+    for line in snapshot_text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue

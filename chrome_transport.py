@@ -1,30 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
 import os
-import queue
 import re
 import socket
 import subprocess
-import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from mcp.client.session import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+
+from tool_stdio_client import ToolProcessClient
 
 
 _PAGE_LINE_RE = re.compile(r"^\s*(\d+):\s+(.*?)(\s+\[selected\])?\s*$")
 _PROXY_URL = "http://127.0.0.1:8766"
 _PROXY_SCRIPT = Path(__file__).parent / "chrome_transport_proxy.py"
-# Resolve venv python cross-platform (Scripts/ on Windows, bin/ on mac/linux)
 _VENV_ROOT = Path(__file__).resolve().parent / ".venv"
 _PROXY_PYTHON = (
     _VENV_ROOT / "Scripts" / "python.exe"
@@ -32,23 +27,12 @@ _PROXY_PYTHON = (
     else _VENV_ROOT / "bin" / "python"
 )
 _DEFAULT_CHROME_PATHS = (
-    # macOS
     Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     Path(os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")),
-    # Windows
     Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
     Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
     Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local")) / "Google/Chrome/Application/chrome.exe",
 )
-
-
-def _tool_text(result: Any) -> str:
-    parts: list[str] = []
-    for item in getattr(result, "content", []) or []:
-        text = getattr(item, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts).strip()
 
 
 def _parse_pages(text: str) -> list[dict[str, Any]]:
@@ -99,8 +83,26 @@ def _resolve_chrome_path() -> str:
     raise RuntimeError("Could not locate chrome.exe for the Chrome transport.")
 
 
+def _tool_command(browser_url: Optional[str], auto_connect: bool) -> tuple[str, list[str]]:
+    if os.name == "nt":
+        args = ["/c", "npx", "-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
+        command = "cmd"
+    else:
+        args = ["-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
+        command = "npx"
+
+    if browser_url:
+        args.extend(["--browserUrl", browser_url])
+    elif auto_connect:
+        args.extend(["--autoConnect", "--channel=stable"])
+    else:
+        raise RuntimeError("Chrome transport has no browser target configured.")
+
+    return command, args
+
+
 @dataclass
-class ChromeMcpRuntime:
+class ChromeTransportRuntime:
     instance_id: str
     context_dir: Path
     browser_url: Optional[str] = None
@@ -109,17 +111,14 @@ class ChromeMcpRuntime:
     _page_id: Optional[int] = None
     _browser_process: Optional[subprocess.Popen] = None
     _browser_debug_port: Optional[int] = None
-    _worker_thread: Optional[threading.Thread] = None
-    _command_queue: Optional[queue.Queue] = None
-    _worker_ready: Optional[threading.Event] = None
-    _worker_error: Optional[BaseException] = None
+    _client: Optional[ToolProcessClient] = None
 
     @property
     def connected(self) -> bool:
         if self.auto_connect:
             return _proxy_is_healthy()
-        if self.browser_url:
-            return self._worker_thread is not None and self._worker_thread.is_alive()
+        if self._client is not None and self._client.running:
+            return True
         return self._browser_process is not None and self._browser_process.poll() is None
 
     def _log(self, message: str, *args: Any) -> None:
@@ -148,6 +147,7 @@ class ChromeMcpRuntime:
                     return
         except (httpx.ConnectError, httpx.TimeoutException):
             pass
+
         self._log("Starting Ghost Chrome Proxy...")
         creationflags = 0
         if os.name == "nt":
@@ -210,78 +210,22 @@ class ChromeMcpRuntime:
         )
         await self._wait_for_browser_port()
 
-    def _server_parameters(self) -> StdioServerParameters:
-        if os.name == "nt":
-            base_args = ["/c", "npx", "-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
-            command = "cmd"
-        else:
-            base_args = ["-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
-            command = "npx"
-        if self.browser_url:
-            base_args.extend(["--browserUrl", self.browser_url])
-        elif self.auto_connect:
-            base_args.extend(["--autoConnect", "--channel=stable"])
-        else:
-            raise RuntimeError("Chrome transport has no browser target configured.")
-        return StdioServerParameters(command=command, args=base_args)
-
-    def _thread_main(self) -> None:
-        try:
-            import anyio
-
-            anyio.run(self._async_thread_main)
-        except BaseException as exc:  # pragma: no cover - startup/runtime propagation
-            self._worker_error = exc
-            if self._worker_ready is not None:
-                self._worker_ready.set()
-
-    async def _async_thread_main(self) -> None:
-        import anyio
-
-        assert self._command_queue is not None
-        assert self._worker_ready is not None
-
-        async with stdio_client(self._server_parameters()) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                self._worker_ready.set()
-                while True:
-                    operation, payload, future = await anyio.to_thread.run_sync(self._command_queue.get)
-                    if operation == "stop":
-                        future.set_result(None)
-                        break
-                    try:
-                        result = await session.call_tool(
-                            payload["name"],
-                            payload.get("arguments") or {},
-                            read_timeout_seconds=timedelta(seconds=payload.get("timeout_seconds", 60.0)),
-                        )
-                        future.set_result(_tool_text(result))
-                    except BaseException as exc:  # pragma: no cover - delegated from transport session
-                        future.set_exception(exc)
-
-    async def _ensure_worker(self) -> None:
+    async def _ensure_client(self) -> None:
         if self.auto_connect:
             await self._ensure_proxy_running()
             return
+
         await self.ensure_browser()
-        if self._worker_thread is not None and self._worker_thread.is_alive():
+        if self._client is not None and self._client.running:
             return
 
-        self._worker_error = None
-        self._command_queue = queue.Queue()
-        self._worker_ready = threading.Event()
-        self._worker_thread = threading.Thread(
-            target=self._thread_main,
-            name=f"ghost-chrome-mcp-{self.instance_id}",
-            daemon=True,
-        )
-        self._worker_thread.start()
-        await asyncio.to_thread(self._worker_ready.wait, 30.0)
-        if self._worker_error is not None:
-            raise RuntimeError(f"Chrome transport worker failed to start: {self._worker_error}") from self._worker_error
-        if not self._worker_ready.is_set():
-            raise RuntimeError("Chrome transport worker did not become ready in time.")
+        if self._client is not None:
+            await self._client.close()
+
+        command, args = _tool_command(self.browser_url, False)
+        client = ToolProcessClient(command=command, args=args, cwd=Path(__file__).parent)
+        await client.initialize()
+        self._client = client
 
     async def call_tool(
         self,
@@ -296,30 +240,19 @@ class ChromeMcpRuntime:
             if self._page_id is not None:
                 payload["page_id"] = self._page_id
             async with httpx.AsyncClient() as client:
-                resp = await client.post(
+                response = await client.post(
                     f"{_PROXY_URL}/call",
                     json=payload,
                     timeout=timeout_seconds + 5,
                 )
-                data = resp.json()
+                data = response.json()
                 if data.get("error"):
-                    raise RuntimeError(data["error"])
-                return data.get("result") or ""
-        await self._ensure_worker()
-        assert self._command_queue is not None
-        future: concurrent.futures.Future[str] = concurrent.futures.Future()
-        self._command_queue.put(
-            (
-                "tool",
-                {
-                    "name": name,
-                    "arguments": arguments or {},
-                    "timeout_seconds": timeout_seconds,
-                },
-                future,
-            )
-        )
-        return await asyncio.wrap_future(future)
+                    raise RuntimeError(str(data["error"]))
+                return str(data.get("result") or "")
+
+        await self._ensure_client()
+        assert self._client is not None
+        return await self._client.call_tool(name, arguments or {}, timeout_seconds=timeout_seconds)
 
     async def list_pages(self) -> list[dict[str, Any]]:
         text = await self.call_tool("list_pages", {}, timeout_seconds=20.0)
@@ -329,7 +262,6 @@ class ChromeMcpRuntime:
         return pages
 
     async def create_tab(self, url: Optional[str] = None) -> dict[str, Any]:
-        """Open a new Chrome tab and pin this runtime instance to it."""
         target_url = url or "about:blank"
         text = await self.call_tool(
             "new_page",
@@ -443,17 +375,11 @@ class ChromeMcpRuntime:
 
     async def close(self) -> None:
         self._page_id = None
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
         if self.auto_connect:
             return
-        if self._worker_thread is not None and self._worker_thread.is_alive() and self._command_queue is not None:
-            future: concurrent.futures.Future[None] = concurrent.futures.Future()
-            self._command_queue.put(("stop", {}, future))
-            await asyncio.wrap_future(future)
-            await asyncio.to_thread(self._worker_thread.join, 5.0)
-        self._worker_thread = None
-        self._command_queue = None
-        self._worker_ready = None
-        self._worker_error = None
         if self._browser_process is not None and self._browser_process.poll() is None:
             self._browser_process.terminate()
             try:

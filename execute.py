@@ -10,7 +10,7 @@ Usage:
     result = execute(choice=7, vacuum_result=vr, page=page, value="search query")
 
     # Structured action output for external runtimes
-    payload = execute_mcp(choice=3, vacuum_result=vr)
+    payload = build_action_payload(choice=3, vacuum_result=vr)
 
     # Describe what an action would do
     desc = describe_action(element)
@@ -208,7 +208,7 @@ def execute(
 # Structured external-runtime execution path
 # ---------------------------------------------------------------------------
 
-def execute_mcp(
+def build_action_payload(
     choice: int,
     vacuum_result: VacuumResult,
     value: Optional[str] = None,
@@ -274,16 +274,16 @@ def _cli_main():
     Usage:
         python execute.py vacuum_output.json 3
         python execute.py vacuum_output.json 7 --value "AI research"
-        python execute.py vacuum_output.json 5 --mcp
+        python execute.py vacuum_output.json 5 --payload
     """
     if len(sys.argv) < 3:
-        print("Usage: python execute.py <vacuum_json> <choice> [--value TEXT] [--mcp]")
+        print("Usage: python execute.py <vacuum_json> <choice> [--value TEXT] [--payload]")
         print()
         print("Arguments:")
         print("  vacuum_json  Path to vacuum output JSON")
         print("  choice       Element number to execute")
         print("  --value TEXT  Value for fill/set actions")
-        print("  --mcp        Show structured action dict instead of Playwright")
+        print("  --payload    Show structured action dict instead of Playwright")
         sys.exit(1)
 
     json_path = sys.argv[1]
@@ -291,7 +291,7 @@ def _cli_main():
 
     # Parse optional flags
     value = None
-    use_mcp = "--mcp" in sys.argv
+    use_payload = "--payload" in sys.argv
     if "--value" in sys.argv:
         vi = sys.argv.index("--value")
         if vi + 1 < len(sys.argv):
@@ -326,8 +326,8 @@ def _cli_main():
     print(f"Description: {describe_action(element, value)}")
     print()
 
-    if use_mcp:
-        result = execute_mcp(choice, vr, value=value)
+    if use_payload:
+        result = build_action_payload(choice, vr, value=value)
         print("Action Dict:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:

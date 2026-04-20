@@ -14,6 +14,8 @@ path is now the CLI only:
 - `./ghost-cli call ...`
 - `./ghost-cli repl`
 
+The supported CLI path no longer depends on the Python `mcp` package.
+
 The legacy server files still exist in the repository only as compatibility
 shims for older integrations. They are not the recommended or supported way to
 run Ghost.
