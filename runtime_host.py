@@ -372,6 +372,7 @@ class GhostInstance:
     _playwright_session_transport: Optional[PlaywrightSessionTransport] = None
     cdp_url: Optional[str] = None  # e.g. "http://localhost:9222" to attach to external browser
     playwright_session: Optional[str] = None
+    headless: bool = False
     vacuum_cache: Optional[VacuumResult] = None
     page_url: str = ""
     page_title: str = ""
@@ -510,7 +511,7 @@ class GhostInstance:
             self.context_dir.mkdir(parents=True, exist_ok=True)
             self.context = await playwright.chromium.launch_persistent_context(
                 str(self.context_dir),
-                headless=False,
+                headless=self.headless,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--remote-debugging-port=0",
@@ -1395,6 +1396,14 @@ async def _apply_attachment_arguments(instance: GhostInstance, arguments: dict[s
         instance.playwright_session = normalized_session
         instance.cdp_url = None
         return
+
+    # Allow toggling headless mode on the existing Playwright-owned context.
+    headless = arguments.get("headless")
+    if headless is not None:
+        target = bool(headless)
+        if instance.headless != target and has_existing_transport and instance.cdp_url is None and instance.playwright_session is None:
+            await instance.close_browser("switching headless mode")
+        instance.headless = target
 
     await _maybe_attach_default_instance_to_liquid(instance)
 

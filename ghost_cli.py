@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from contextlib import suppress
@@ -143,6 +144,12 @@ def cmd_list_tools(_args) -> None:
 def cmd_call(args) -> None:
     async def _run() -> None:
         arguments = _load_arguments(args.arguments)
+        # Inject CLI --headless into ghost_instance_create arguments
+        if getattr(args, "headless", False) and args.tool_name == "ghost_instance_create":
+            arguments["headless"] = True
+        # Also respect GHOST_HEADLESS environment variable
+        if os.environ.get("GHOST_HEADLESS", "").lower() in ("1", "true", "yes") and args.tool_name == "ghost_instance_create":
+            arguments.setdefault("headless", True)
         if args.ephemeral:
             text = await _invoke_tool(args.tool_name, arguments)
         else:
@@ -273,6 +280,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ephemeral",
         action="store_true",
         help="Run the tool in a throwaway process instead of the persistent local daemon.",
+    )
+    p_call.add_argument(
+        "--headless",
+        action="store_true",
+        help="Launch browser in headless mode (no visible window). Only affects ghost_instance_create.",
     )
     p_call.set_defaults(func=cmd_call)
 

@@ -74,6 +74,14 @@ def get_ghost_tools() -> list[ToolDef]:
                             "Call ghost_instance_list first to see what instances are available."
                         ),
                     },
+                    "headless": {
+                        "type": "boolean",
+                        "description": (
+                            "Launch the browser in headless mode (no visible window). "
+                            "Defaults to false so the user can see the browser, but set to true "
+                            "when running on servers or in CI without a display."
+                        ),
+                    },
                 },
             },
         ),

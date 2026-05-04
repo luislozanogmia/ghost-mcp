@@ -337,6 +337,11 @@ def build_parser():
         action="store_true",
         help="Wrap the tool response in a JSON envelope.",
     )
+    p_tool.add_argument(
+        "--headless",
+        action="store_true",
+        help="Launch browser in headless mode (no visible window). Only affects ghost_instance_create.",
+    )
 
     p_repl = subparsers.add_parser(
         "repl",
