@@ -102,6 +102,12 @@ class GhostChromeProxy:
             )
 
         no_preselect = {"select_page", "list_pages", "new_page"}
+        # chrome-devtools-mcp >=1.8 requires pageId as an explicit argument
+        # on per-page tools (take_snapshot, take_screenshot, etc.), not just
+        # via a prior select_page call.  Inject it when the caller supplied one.
+        needs_page_arg = {"take_snapshot", "take_screenshot", "evaluate_script",
+                          "click", "fill", "press_key", "navigate_page",
+                          "hover", "drag", "select_option", "take_screenshot"}
         async with self._lock:
             try:
                 if page_id is not None and name not in no_preselect:
@@ -110,6 +116,8 @@ class GhostChromeProxy:
                         {"pageId": page_id, "bringToFront": False},
                         timeout_seconds=10.0,
                     )
+                    if name in needs_page_arg and "pageId" not in arguments:
+                        arguments = {**arguments, "pageId": page_id}
                 text = await self._client.call_tool(
                     name,
                     arguments,
